@@ -19,9 +19,10 @@ let pc = null;
 let roomId = null;
 let userId = Math.random().toString(36).substr(2, 9);
 
-// ICE queue fix
+// 🔥 FIXES
 let pendingCandidates = [];
 let isRemoteDescSet = false;
+let callStarted = false;
 
 // STUN
 const servers = {
@@ -35,35 +36,32 @@ function setStatus(text) {
   console.log("STATUS:", text);
 }
 
-// 🎥 CAMERA INIT
+// 🎥 CAMERA
 async function initMedia() {
   try {
-    console.log("Init media called");
+    console.log("Init media");
 
     localStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "user" },
+      video: true,
       audio: true
     });
 
     document.getElementById("localVideo").srcObject = localStream;
 
-    console.log("✅ Camera started");
-
   } catch (e) {
-    console.error("Camera error:", e);
-    alert("Camera error: " + e.name);
+    alert("Camera error");
   }
 }
 
-window.onload = async () => {
-  await initMedia();
-};
+window.onload = initMedia;
 
-// 🔎 FIND MATCH (FIXED)
+// 🔎 FIND MATCH (FINAL FIX)
 async function findMatch() {
   setStatus("Searching...");
 
   const waitingRef = db.ref("waiting");
+  const roomsRef = db.ref("rooms");
+
   const snapshot = await waitingRef.once("value");
 
   if (snapshot.exists()) {
@@ -71,7 +69,7 @@ async function findMatch() {
 
     roomId = "room_" + otherUser;
 
-    await db.ref("rooms/" + roomId).set({
+    await roomsRef.child(roomId).set({
       users: {
         [userId]: true,
         [otherUser]: true
@@ -89,9 +87,12 @@ async function findMatch() {
 
     console.log("Waiting...");
 
-    waitingRef.on("child_removed", async (snap) => {
-      if (snap.key !== userId) {
-        roomId = "room_" + userId;
+    // 🔥 ROOM LISTENER FIX
+    roomsRef.on("child_added", (snap) => {
+      const data = snap.val();
+
+      if (data.users && data.users[userId]) {
+        roomId = snap.key;
 
         console.log("Matched as receiver");
 
@@ -103,6 +104,10 @@ async function findMatch() {
 
 // 🚀 START CALL
 async function startCall(isCaller) {
+
+  if (callStarted) return;
+  callStarted = true;
+
   setStatus("Connecting...");
 
   pc = new RTCPeerConnection(servers);
@@ -111,10 +116,7 @@ async function startCall(isCaller) {
     pc.addTrack(track, localStream);
   });
 
-  // REMOTE STREAM FIX
   pc.ontrack = (event) => {
-    console.log("📡 Track:", event.track.kind);
-
     remoteStream.addTrack(event.track);
     document.getElementById("remoteVideo").srcObject = remoteStream;
   };
@@ -128,7 +130,7 @@ async function startCall(isCaller) {
     }
   };
 
-  // ICE RECEIVE (FIXED)
+  // ICE RECEIVE FIX
   roomRef.child("candidates").on("child_added", async (snap) => {
     const candidate = new RTCIceCandidate(JSON.parse(snap.val()));
 
@@ -150,14 +152,12 @@ async function startCall(isCaller) {
 
     roomRef.child("answer").on("value", async (snap) => {
       if (snap.exists()) {
-        console.log("Received ANSWER");
-
         const answer = JSON.parse(snap.val());
+
         await pc.setRemoteDescription(answer);
 
         isRemoteDescSet = true;
 
-        // apply queued ICE
         for (let c of pendingCandidates) {
           await pc.addIceCandidate(c);
         }
@@ -168,14 +168,12 @@ async function startCall(isCaller) {
   } else {
     roomRef.child("offer").on("value", async (snap) => {
       if (snap.exists()) {
-        console.log("Received OFFER");
-
         const offer = JSON.parse(snap.val());
+
         await pc.setRemoteDescription(offer);
 
         isRemoteDescSet = true;
 
-        // apply queued ICE
         for (let c of pendingCandidates) {
           await pc.addIceCandidate(c);
         }
@@ -185,28 +183,23 @@ async function startCall(isCaller) {
         await pc.setLocalDescription(answer);
 
         await roomRef.child("answer").set(JSON.stringify(answer));
-
-        console.log("Sent ANSWER");
       }
     });
   }
 
-  // DISCONNECT SYNC
+  // DISCONNECT
   db.ref("rooms/" + roomId + "/users").on("value", (snap) => {
     const users = snap.val();
 
     if (!users || Object.keys(users).length < 2) {
-      console.log("User disconnected");
-
       if (pc) pc.close();
 
       setStatus("User disconnected");
-
       document.getElementById("remoteVideo").srcObject = null;
     }
   });
 
-  // SELF REMOVE
+  // AUTO REMOVE
   const myRef = db.ref("rooms/" + roomId + "/users/" + userId);
   myRef.onDisconnect().remove();
 
@@ -219,7 +212,7 @@ async function startCall(isCaller) {
   };
 }
 
-// 🔁 NEXT
+// NEXT
 async function nextUser() {
   if (pc) pc.close();
 
@@ -230,7 +223,7 @@ async function nextUser() {
   location.reload();
 }
 
-// BUTTON FIX
+// BUTTONS
 document.getElementById("findBtn").onclick = findMatch;
 document.getElementById("nextBtn").onclick = nextUser;
 
