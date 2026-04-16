@@ -9,6 +9,8 @@ const firebaseConfig = {
   appId: "1:685763814033:web:f573e17b8125ba1bad5530",
   measurementId: "G-9G8M5W4WZ8"
 };
+
+
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
@@ -25,7 +27,6 @@ const servers = {
   ]
 };
 
-// STATUS
 function setStatus(text) {
   document.getElementById("status").innerText = "Status: " + text;
   console.log("STATUS:", text);
@@ -51,10 +52,19 @@ async function initMedia() {
   }
 }
 
-// PAGE LOAD
 window.onload = () => {
   initMedia();
 };
+
+// 🧹 CLEANUP
+async function cleanup() {
+  if (!roomId) return;
+
+  await db.ref("rooms/" + roomId).remove();
+  await db.ref("calls/" + roomId).remove();
+
+  console.log("🧹 Room deleted:", roomId);
+}
 
 // 🔎 FIND MATCH
 async function findMatch() {
@@ -68,14 +78,12 @@ async function findMatch() {
   const waitingRef = db.ref("waiting");
   const snapshot = await waitingRef.once("value");
 
-  console.log("Waiting users:", snapshot.val());
-
   if (snapshot.exists()) {
     const otherUser = Object.keys(snapshot.val())[0];
 
-    console.log("Matched with:", otherUser);
+    roomId = "room_" + Date.now();
 
-    roomId = userId + "_" + otherUser;
+    console.log("Matched with:", otherUser);
 
     await db.ref("rooms/" + roomId).set({
       users: [userId, otherUser]
@@ -83,19 +91,18 @@ async function findMatch() {
 
     await waitingRef.child(otherUser).remove();
 
-    startCall(false);
+    startCall(true); // caller
 
   } else {
-    console.log("No users, going to waiting...");
-
     await waitingRef.child(userId).set(true);
 
     waitingRef.on("child_removed", async (snap) => {
       if (snap.key !== userId) {
-        console.log("Matched (listener):", snap.key);
+        roomId = "room_" + Date.now();
 
-        roomId = snap.key + "_" + userId;
-        startCall(true);
+        console.log("Matched as receiver:", snap.key);
+
+        startCall(false); // receiver
       }
     });
   }
@@ -109,7 +116,6 @@ async function startCall(isCaller) {
 
   // ADD TRACKS
   localStream.getTracks().forEach(track => {
-    console.log("Adding track:", track.kind);
     pc.addTrack(track, localStream);
   });
 
@@ -127,15 +133,12 @@ async function startCall(isCaller) {
   // ICE SEND
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      console.log("📤 ICE sent");
       roomRef.child("candidates").push(JSON.stringify(event.candidate));
     }
   };
 
   // ICE RECEIVE
   roomRef.child("candidates").on("child_added", async (snap) => {
-    console.log("📥 ICE received");
-
     const candidate = new RTCIceCandidate(JSON.parse(snap.val()));
     await pc.addIceCandidate(candidate);
   });
@@ -174,22 +177,30 @@ async function startCall(isCaller) {
     });
   }
 
-  // CONNECTION STATE
-  pc.onconnectionstatechange = () => {
-    console.log("🔥 STATE:", pc.connectionState);
+  // STATE
+  pc.onconnectionstatechange = async () => {
+    console.log("STATE:", pc.connectionState);
 
     if (pc.connectionState === "connected") {
       setStatus("Connected 🎉");
     }
 
-    if (pc.connectionState === "failed") {
-      setStatus("Failed ❌");
+    if (pc.connectionState === "disconnected") {
+      await cleanup();
     }
   };
 }
 
-// 🔁 NEXT
-function nextUser() {
+// 🔁 NEXT USER
+async function nextUser() {
   if (pc) pc.close();
+
+  await cleanup();
+
   location.reload();
 }
+
+// 🔥 AUTO CLEAN ON REFRESH
+window.onbeforeunload = async () => {
+  await cleanup();
+};
