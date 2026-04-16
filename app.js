@@ -9,6 +9,7 @@ const firebaseConfig = {
   appId: "1:685763814033:web:f573e17b8125ba1bad5530",
   measurementId: "G-9G8M5W4WZ8"
 };
+
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
@@ -18,6 +19,10 @@ let pc = null;
 let roomId = null;
 let userId = Math.random().toString(36).substr(2, 9);
 
+// ICE queue fix
+let pendingCandidates = [];
+let isRemoteDescSet = false;
+
 // STUN
 const servers = {
   iceServers: [
@@ -25,7 +30,6 @@ const servers = {
   ]
 };
 
-// STATUS
 function setStatus(text) {
   document.getElementById("status").innerText = "Status: " + text;
   console.log("STATUS:", text);
@@ -33,9 +37,9 @@ function setStatus(text) {
 
 // 🎥 CAMERA INIT
 async function initMedia() {
-  if (localStream) return;
-
   try {
+    console.log("Init media called");
+
     localStream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "user" },
       audio: true
@@ -46,16 +50,16 @@ async function initMedia() {
     console.log("✅ Camera started");
 
   } catch (e) {
-    console.error("❌ Camera error:", e);
+    console.error("Camera error:", e);
     alert("Camera error: " + e.name);
   }
 }
 
-window.onload = () => {
-  initMedia();
+window.onload = async () => {
+  await initMedia();
 };
 
-// 🔎 FIND MATCH (PRO LOGIC)
+// 🔎 FIND MATCH (FIXED)
 async function findMatch() {
   setStatus("Searching...");
 
@@ -65,11 +69,8 @@ async function findMatch() {
   if (snapshot.exists()) {
     const otherUser = Object.keys(snapshot.val())[0];
 
-    roomId = "room_" + Date.now();
+    roomId = "room_" + otherUser;
 
-    console.log("Matched with:", otherUser);
-
-    // room create
     await db.ref("rooms/" + roomId).set({
       users: {
         [userId]: true,
@@ -77,23 +78,24 @@ async function findMatch() {
       }
     });
 
-    // remove from waiting
     await waitingRef.child(otherUser).remove();
 
-    startCall(true); // caller
+    console.log("Matched as caller");
+
+    startCall(true);
 
   } else {
-    console.log("Waiting...");
-
     await waitingRef.child(userId).set(true);
+
+    console.log("Waiting...");
 
     waitingRef.on("child_removed", async (snap) => {
       if (snap.key !== userId) {
-        roomId = "room_" + Date.now();
+        roomId = "room_" + userId;
 
-        console.log("Matched as receiver:", snap.key);
+        console.log("Matched as receiver");
 
-        startCall(false); // receiver
+        startCall(false);
       }
     });
   }
@@ -105,12 +107,11 @@ async function startCall(isCaller) {
 
   pc = new RTCPeerConnection(servers);
 
-  // ADD TRACKS
   localStream.getTracks().forEach(track => {
     pc.addTrack(track, localStream);
   });
 
-  // REMOTE VIDEO FIX
+  // REMOTE STREAM FIX
   pc.ontrack = (event) => {
     console.log("📡 Track:", event.track.kind);
 
@@ -127,14 +128,21 @@ async function startCall(isCaller) {
     }
   };
 
-  // ICE RECEIVE
+  // ICE RECEIVE (FIXED)
   roomRef.child("candidates").on("child_added", async (snap) => {
     const candidate = new RTCIceCandidate(JSON.parse(snap.val()));
-    await pc.addIceCandidate(candidate);
+
+    if (isRemoteDescSet) {
+      await pc.addIceCandidate(candidate);
+    } else {
+      pendingCandidates.push(candidate);
+    }
   });
 
   // OFFER / ANSWER
   if (isCaller) {
+    console.log("Creating OFFER");
+
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
@@ -142,29 +150,53 @@ async function startCall(isCaller) {
 
     roomRef.child("answer").on("value", async (snap) => {
       if (snap.exists()) {
-        await pc.setRemoteDescription(JSON.parse(snap.val()));
+        console.log("Received ANSWER");
+
+        const answer = JSON.parse(snap.val());
+        await pc.setRemoteDescription(answer);
+
+        isRemoteDescSet = true;
+
+        // apply queued ICE
+        for (let c of pendingCandidates) {
+          await pc.addIceCandidate(c);
+        }
+        pendingCandidates = [];
       }
     });
 
   } else {
     roomRef.child("offer").on("value", async (snap) => {
       if (snap.exists()) {
-        await pc.setRemoteDescription(JSON.parse(snap.val()));
+        console.log("Received OFFER");
+
+        const offer = JSON.parse(snap.val());
+        await pc.setRemoteDescription(offer);
+
+        isRemoteDescSet = true;
+
+        // apply queued ICE
+        for (let c of pendingCandidates) {
+          await pc.addIceCandidate(c);
+        }
+        pendingCandidates = [];
 
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
 
         await roomRef.child("answer").set(JSON.stringify(answer));
+
+        console.log("Sent ANSWER");
       }
     });
   }
 
-  // 🔥 DISCONNECT LISTENER (MAIN PRO FEATURE)
+  // DISCONNECT SYNC
   db.ref("rooms/" + roomId + "/users").on("value", (snap) => {
     const users = snap.val();
 
     if (!users || Object.keys(users).length < 2) {
-      console.log("❌ Other user left");
+      console.log("User disconnected");
 
       if (pc) pc.close();
 
@@ -174,11 +206,10 @@ async function startCall(isCaller) {
     }
   });
 
-  // 🔥 SELF DISCONNECT TRACK
+  // SELF REMOVE
   const myRef = db.ref("rooms/" + roomId + "/users/" + userId);
   myRef.onDisconnect().remove();
 
-  // STATE
   pc.onconnectionstatechange = () => {
     console.log("STATE:", pc.connectionState);
 
@@ -188,7 +219,7 @@ async function startCall(isCaller) {
   };
 }
 
-// 🔁 NEXT USER
+// 🔁 NEXT
 async function nextUser() {
   if (pc) pc.close();
 
@@ -199,10 +230,13 @@ async function nextUser() {
   location.reload();
 }
 
-// 🔥 REFRESH CLEANUP
+// BUTTON FIX
+document.getElementById("findBtn").onclick = findMatch;
+document.getElementById("nextBtn").onclick = nextUser;
+
+// REFRESH CLEAN
 window.onbeforeunload = () => {
   if (roomId) {
     db.ref("rooms/" + roomId + "/users/" + userId).remove();
   }
-};();
 };
