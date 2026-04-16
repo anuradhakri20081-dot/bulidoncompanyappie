@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Omegle Debug</title>
+</head>
+<body>
+
+<h2>Omegle Clone (DEBUG)</h2>
+
+<button onclick="findMatch()">Find</button>
+<button onclick="nextUser()">Next</button>
+
+<p id="status">Status: Idle</p>
+
+<br>
+
+<video id="localVideo" autoplay muted playsinline width="200"></video>
+<video id="remoteVideo" autoplay playsinline width="200"></video>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script src="app.js"></script>
+
+</body>
+</html>
